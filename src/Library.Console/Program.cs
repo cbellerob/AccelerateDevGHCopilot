@@ -12,13 +12,14 @@ var configuration = new ConfigurationBuilder()
 
 services.AddSingleton<IConfiguration>(configuration);
 
+services.AddSingleton<JsonData>(); // Register JsonData as singleton
+
 services.AddScoped<IPatronRepository, JsonPatronRepository>();
 services.AddScoped<ILoanRepository, JsonLoanRepository>();
 services.AddScoped<ILoanService, LoanService>();
 services.AddScoped<IPatronService, PatronService>();
 
-services.AddSingleton<JsonData>();
-services.AddSingleton<ConsoleApp>();
+services.AddSingleton<ConsoleApp>(); // ConsoleApp will receive JsonData
 
 var servicesProvider = services.BuildServiceProvider();
 
