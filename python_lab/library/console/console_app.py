@@ -4,6 +4,7 @@ from application_core.interfaces.ipatron_repository import IPatronRepository
 from application_core.interfaces.iloan_repository import ILoanRepository
 from application_core.interfaces.iloan_service import ILoanService
 from application_core.interfaces.ipatron_service import IPatronService
+from infrastructure.json_data import JsonData  # added import
 
 class ConsoleApp:
     def __init__(
@@ -11,7 +12,8 @@ class ConsoleApp:
         loan_service: ILoanService,
         patron_service: IPatronService,
         patron_repository: IPatronRepository,
-        loan_repository: ILoanRepository
+        loan_repository: ILoanRepository,
+        json_data: JsonData = None  # added parameter
     ):
         self._current_state: ConsoleState = ConsoleState.PATRON_SEARCH
         self.matching_patrons = []
@@ -21,6 +23,7 @@ class ConsoleApp:
         self._loan_repository = loan_repository
         self._loan_service = loan_service
         self._patron_service = patron_service
+        self._json_data = json_data  # store JsonData for direct access to Books/BookItems/Loans
 
     def write_input_options(self, options):
         print("Input Options:")
@@ -32,6 +35,8 @@ class ConsoleApp:
             print(' - "m" to extend patron\'s membership')
         if options & CommonActions.SEARCH_PATRONS:
             print(' - "s" for new search')
+        if options & CommonActions.SEARCH_BOOKS:
+            print(' - "b" to check for book availability')
         if options & CommonActions.QUIT:
             print(' - "q" to quit')
         if options & CommonActions.SELECT:
@@ -107,8 +112,16 @@ class ConsoleApp:
                 | CommonActions.SEARCH_PATRONS
                 | CommonActions.QUIT
                 | CommonActions.SELECT
+                | CommonActions.SEARCH_BOOKS  # added SEARCH_BOOKS
             )
             selection = self._get_patron_details_input(options)
+            # If the user selected the search-books action, prompt for a title now
+            if selection == 'b':
+                book_title = input("Enter a book title to search for: ").strip()
+                if not book_title:
+                    print("No input provided. Returning to patron details.")
+                    return ConsoleState.PATRON_DETAILS
+                return self.search_books(book_title)
             return self._handle_patron_details_selection(selection, patron, valid_loans)
         else:
             print("No valid loans for this patron.")
@@ -146,6 +159,9 @@ class ConsoleApp:
             print(status)
             self.selected_patron_details = self._patron_repository.get_patron(patron.id)
             return ConsoleState.PATRON_DETAILS
+        elif selection == 'b':
+            # call the new search_books method for SEARCH_BOOKS action
+            return self.search_books()
         elif selection.isdigit():
             idx = int(selection)
             if 1 <= idx <= len(valid_loans):
@@ -154,7 +170,7 @@ class ConsoleApp:
             print("Invalid selection. Please enter a number shown in the list above.")
             return ConsoleState.PATRON_DETAILS
         else:
-            print("Invalid input. Please enter a number, 'm', 's', or 'q'.")
+            print("Invalid input. Please enter a number, 'm', 'b', 's', or 'q'.")
             return ConsoleState.PATRON_DETAILS
 
     def _handle_no_loans_selection(self, selection):
@@ -197,6 +213,126 @@ class ConsoleApp:
             print("Invalid input.")
             return ConsoleState.LOAN_DETAILS
 
+    def search_books(self, book_title=None) -> ConsoleState:
+        # Allow repeated searches; return to patron details when user chooses to go back.
+        while True:
+            if book_title is None:
+                book_title = input("Enter a book title to search for (partial or full): ").strip()
+                if not book_title:
+                    print("No input provided. Returning to patron details.")
+                    return ConsoleState.PATRON_DETAILS
+
+            # Load books from JsonData if available, else try repository
+            books = []
+            if self._json_data and getattr(self._json_data, "books", None) is not None:
+                books = self._json_data.books
+            elif hasattr(self._patron_repository, "get_all_books"):
+                try:
+                    books = self._patron_repository.get_all_books()
+                except Exception:
+                    books = []
+
+            # Case-insensitive partial match
+            matches = [b for b in books if book_title.lower() in getattr(b, "title", "").lower()]
+
+            if not matches:
+                print(f"No book found with title matching: {book_title}")
+            elif len(matches) > 1:
+                print("Multiple books match:")
+                for idx, b in enumerate(matches, start=1):
+                    print(f"{idx}) {getattr(b, 'title', 'Unknown')}")
+                sel = input("Enter number to select a book, 'r' to refine search, or 'b' to go back: ").strip().lower()
+                if sel == "b":
+                    return ConsoleState.PATRON_DETAILS
+                if sel == "r":
+                    book_title = None
+                    continue
+                if sel.isdigit() and 1 <= int(sel) <= len(matches):
+                    selected = matches[int(sel) - 1]
+                else:
+                    print("Invalid selection.")
+                    book_title = None
+                    continue
+            else:
+                selected = matches[0]
+
+            # Find all book items (physical copies) for the selected book
+            items = []
+            if self._json_data and getattr(self._json_data, "book_items", None) is not None:
+                items = [bi for bi in self._json_data.book_items if getattr(bi, "book_id", None) == getattr(selected, "id", None)]
+            elif hasattr(self._patron_repository, "get_all_book_items"):
+                try:
+                    items_all = self._patron_repository.get_all_book_items()
+                    items = [bi for bi in items_all if getattr(bi, "book_id", None) == getattr(selected, "id", None)]
+                except Exception:
+                    items = []
+
+            if not items:
+                print(f"No physical copy found for '{getattr(selected, 'title', 'Unknown')}'.")
+            else:
+                # Load loans and determine if copies are on loan (ReturnDate is null)
+                loans = []
+                if self._json_data and getattr(self._json_data, "loans", None) is not None:
+                    loans = self._json_data.loans
+                elif hasattr(self._loan_repository, "get_all_loans"):
+                    try:
+                        loans = self._loan_repository.get_all_loans()
+                    except Exception:
+                        loans = []
+
+                # For each copy, check for an active loan (return_date is None)
+                active_loans = []
+                for bi in items:
+                    for l in loans:
+                        if getattr(l, "book_item_id", None) == getattr(bi, "id", None) and getattr(l, "return_date", None) is None:
+                            active_loans.append(l)
+                            break
+
+                if len(active_loans) < len(items):
+                    print(f"'{getattr(selected, 'title', 'Unknown')}' is available for loan.")
+                    # Offer checkout if a patron is selected
+                    if getattr(self, 'selected_patron_details', None):
+                        patron = self.selected_patron_details
+                        confirm = input(f"Would you like to check out '{getattr(selected, 'title', 'Unknown')}' for {patron.name}? (y/n): ").strip().lower()
+                        if confirm == 'y':
+                            # choose first available copy (book item not in active loans)
+                            active_item_ids = {getattr(l, 'book_item_id', None) for l in active_loans}
+                            available_item = None
+                            for bi in items:
+                                if getattr(bi, 'id', None) not in active_item_ids:
+                                    available_item = bi
+                                    break
+                            if available_item is None:
+                                print("No available copy found at checkout time.")
+                            else:
+                                try:
+                                    new_loan = self._loan_service.checkout_book(patron, available_item)
+                                    print(f"Checked out '{getattr(selected, 'title', 'Unknown')}' to {patron.name}. Due date: {new_loan.due_date}")
+                                    # refresh patron details from repository if available
+                                    try:
+                                        if getattr(self._patron_repository, 'get_patron', None):
+                                            self.selected_patron_details = self._patron_repository.get_patron(patron.id)
+                                    except Exception:
+                                        pass
+                                except Exception as e:
+                                    print(f"Error during checkout: {e}")
+                    else:
+                        print("Select a patron first to perform checkout.")
+                else:
+                    # All copies are on loan; show earliest due date among active loans
+                    try:
+                        earliest = min(active_loans, key=lambda x: x.due_date)
+                        print(f"'{getattr(selected, 'title', 'Unknown')}' is on loan to another patron. The earliest return due date is {earliest.due_date}.")
+                    except Exception:
+                        print(f"All copies of '{getattr(selected, 'title', 'Unknown')}' are currently on loan.")
+
+            # Allow user to search again or go back
+            choice = input("Press 's' to search again or 'b' to go back: ").strip().lower()
+            if choice == "s":
+                book_title = None
+                continue
+            return ConsoleState.PATRON_DETAILS
+
 from application_core.services.loan_service import LoanService
 from application_core.services.patron_service import PatronService
 from infrastructure.json_data import JsonData
@@ -213,6 +349,9 @@ def main():
 
     app = ConsoleApp(
         loan_service=loan_service,
-        patron_service=patron_service
+        patron_service=patron_service,
+        patron_repository=patron_repo,
+        loan_repository=loan_repo,
+        json_data=json_data
     )
     app.run()
