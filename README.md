@@ -4,7 +4,7 @@
 
 ### GitHub Copilot Exercise
 
-This repository contains lab materials for the **mslearn-github-copilot-dev**, 'Develop new code features using GitHub Copilot' module. This exercise provides hands-on experience with the capabilities of **GitHub Copilot**.
+This repository contains lab materials for the **mslearn-github-copilot-dev**, 'Develop new code features using GitHub Copilot' module. The exercise provides hands-on experience with the capabilities of **GitHub Copilot**.
 
 ### Exercise Overview
 
